@@ -17,25 +17,7 @@ try:
 except ImportError:
     HAS_AI = False
 
-def process_video_srt(video_file, video_path_str, srt_file, srt_path_str, mode, threshold, model_name, progress=gr.Progress()):
-    # Xác định đường dẫn file Video
-    if video_file is not None:
-        video_path = video_file.name if hasattr(video_file, 'name') else video_file
-    elif video_path_str and video_path_str.strip():
-        video_path = video_path_str.strip()
-    else:
-        yield "Lỗi: Vui lòng tải lên file Video hoặc nhập đường dẫn file Video cục bộ.", None
-        return
-
-    # Xác định đường dẫn file SRT
-    if srt_file is not None:
-        srt_path = srt_file.name if hasattr(srt_file, 'name') else srt_file
-    elif srt_path_str and srt_path_str.strip():
-        srt_path = srt_path_str.strip()
-    else:
-        yield "Lỗi: Vui lòng tải lên file phụ đề SRT hoặc nhập đường dẫn file SRT cục bộ.", None
-        return
-
+def process_video_srt_core(video_path, srt_path, mode, threshold, model_name, progress):
     log_messages = []
     
     def log(msg):
@@ -227,6 +209,26 @@ def process_video_srt(video_file, video_path_str, srt_file, srt_path_str, mode, 
         if video:
             video.close()
 
+def process_video_srt_direct(video_file, srt_file, mode, threshold, model_name, progress=gr.Progress()):
+    if video_file is None or srt_file is None:
+        yield "Lỗi: Vui lòng tải lên cả file Video và file phụ đề SRT.", None
+        return
+    video_path = video_file.name if hasattr(video_file, 'name') else video_file
+    srt_path = srt_file.name if hasattr(srt_file, 'name') else srt_file
+    
+    for l_val, v_val in process_video_srt_core(video_path, srt_path, mode, threshold, model_name, progress):
+        yield l_val, v_val
+
+def process_video_srt_local(video_path_str, srt_path_str, mode, threshold, model_name, progress=gr.Progress()):
+    video_path = video_path_str.strip() if video_path_str else ""
+    srt_path = srt_path_str.strip() if srt_path_str else ""
+    if not video_path or not srt_path:
+        yield "Lỗi: Vui lòng nhập đầy đủ đường dẫn Video và phụ đề SRT cục bộ.", None
+        return
+        
+    for l_val, v_val in process_video_srt_core(video_path, srt_path, mode, threshold, model_name, progress):
+        yield l_val, v_val
+
 # Custom CSS for modern premium glassmorphism aesthetic
 custom_css = """
 body {
@@ -283,26 +285,9 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft(primary_hue="indigo", second
     with gr.Row():
         with gr.Column(scale=1):
             with gr.Group(elem_classes="glass-panel"):
-                gr.Markdown("### 1. Giao diện & Cấu hình")
+                gr.Markdown("### 1. Đầu vào & Cấu hình")
                 
-                # Tab tải file trực tiếp hoặc nhập đường dẫn cục bộ
-                with gr.Tab("Tải tệp tin trực tiếp"):
-                    video_input = gr.Video(label="Chọn file Video gốc", sources=["upload"])
-                    srt_input = gr.File(label="Chọn file phụ đề SRT", file_types=[".srt"])
-                
-                with gr.Tab("Nhập đường dẫn cục bộ (Khuyên dùng cho tệp lớn)"):
-                    gr.Markdown("*Mẹo: Hãy tải các file nặng trực tiếp lên thanh bên trái (Files) của Google Colab để tăng tốc, sau đó copy đường dẫn dán vào đây.*")
-                    video_path_input = gr.Textbox(
-                        label="Đường dẫn file Video gốc trên Colab", 
-                        placeholder="Ví dụ: /content/video.mp4",
-                        value=""
-                    )
-                    srt_path_input = gr.Textbox(
-                        label="Đường dẫn file phụ đề SRT trên Colab", 
-                        placeholder="Ví dụ: /content/sub.srt",
-                        value=""
-                    )
-                
+                # Biến cấu hình dùng chung đặt bên ngoài Tab để tránh xung đột
                 model_input = gr.Dropdown(
                     choices=["Qwen/Qwen3-VL-Embedding-2B", "Qwen/Qwen3-VL-Embedding-8B"],
                     value="Qwen/Qwen3-VL-Embedding-2B",
@@ -323,18 +308,43 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft(primary_hue="indigo", second
                     label="Ngưỡng tin cậy (Confidence Threshold)"
                 )
                 
-                submit_btn = gr.Button("Bắt Đầu Xử Lý", variant="primary", elem_classes="btn-primary")
+                # Các Tab chứa phương thức tải tệp và các nút bấm riêng biệt
+                with gr.Tab("Tải tệp tin trực tiếp từ máy"):
+                    video_input = gr.Video(label="Chọn file Video gốc", sources=["upload"])
+                    srt_input = gr.File(label="Chọn file phụ đề SRT", file_types=[".srt"])
+                    submit_btn_direct = gr.Button("Bắt Đầu Xử Lý (Trực tiếp)", variant="primary", elem_classes="btn-primary")
                 
+                with gr.Tab("Nhập đường dẫn trên Colab (Khuyên dùng cho tệp lớn)"):
+                    gr.Markdown("*Mẹo: Hãy tải file lên thanh bên trái (Files) của Colab, sau đó chuột phải chọn **Copy path** và dán vào đây.*")
+                    video_path_input = gr.Textbox(
+                        label="Đường dẫn file Video gốc trên Colab", 
+                        placeholder="Ví dụ: /content/video.mp4",
+                        value=""
+                    )
+                    srt_path_input = gr.Textbox(
+                        label="Đường dẫn file phụ đề SRT trên Colab", 
+                        placeholder="Ví dụ: /content/sub.srt",
+                        value=""
+                    )
+                    submit_btn_local = gr.Button("Bắt Đầu Xử Lý (Đường dẫn cục bộ)", variant="primary", elem_classes="btn-primary")
+
         with gr.Column(scale=1):
             with gr.Group(elem_classes="glass-panel"):
                 gr.Markdown("### 2. Kết quả & Nhật ký hoạt động")
                 video_output = gr.Video(label="Video kết quả đã ghép nối")
                 log_output = gr.Code(label="Nhật ký hoạt động (Logs)", language="python", lines=15)
 
-    # Đảm bảo Gradio truyền các đối tượng mặc định None khi Tab kia được chọn
-    submit_btn.click(
-        fn=process_video_srt,
-        inputs=[video_input, video_path_input, srt_input, srt_path_input, mode_input, threshold_input, model_input],
+    # Nút bấm 1: Chỉ lấy dữ liệu từ các file tải lên trực tiếp (Không kiểm tra trạng thái upload của Tab 2)
+    submit_btn_direct.click(
+        fn=process_video_srt_direct,
+        inputs=[video_input, srt_input, mode_input, threshold_input, model_input],
+        outputs=[log_output, video_output]
+    )
+
+    # Nút bấm 2: Chỉ lấy dữ liệu từ các Textbox đường dẫn (Không kiểm tra trạng thái upload của Tab 1)
+    submit_btn_local.click(
+        fn=process_video_srt_local,
+        inputs=[video_path_input, srt_path_input, mode_input, threshold_input, model_input],
         outputs=[log_output, video_output]
     )
 
