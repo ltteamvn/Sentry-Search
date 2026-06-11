@@ -15,3 +15,7 @@ coverage.xml
 .coverage
 
 CLAUDE.md
+
+# Logs and local env
+error.log
+.venv/

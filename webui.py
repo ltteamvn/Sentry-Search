@@ -1,0 +1,297 @@
+import os
+import sys
+import tempfile
+import torch
+import torch.nn.functional as F
+from PIL import Image
+import numpy as np
+import pysrt
+from moviepy import VideoFileClip, concatenate_videoclips
+import gradio as gr
+
+# Optional imports for AI
+try:
+    from transformers import AutoProcessor, AutoModel
+    from qwen_vl_utils import process_vision_info
+    HAS_AI = True
+except ImportError:
+    HAS_AI = False
+
+def process_video_srt(video_file, srt_file, mode, threshold, progress=gr.Progress()):
+    if video_file is None or srt_file is None:
+        yield "Lỗi: Vui lòng cung cấp cả file Video và file phụ đề SRT.", None
+        return
+
+    video_path = video_file.name if hasattr(video_file, 'name') else video_file
+    srt_path = srt_file.name if hasattr(srt_file, 'name') else srt_file
+
+    log_messages = []
+    
+    def log(msg):
+        log_messages.append(msg)
+        print(msg)
+        return "\n".join(log_messages)
+
+    yield log("Đang tải file SRT..."), None
+    try:
+        subs = pysrt.open(srt_path)
+    except Exception as e:
+        yield log(f"Lỗi đọc file SRT: {e}"), None
+        return
+
+    yield log("Đang tải video gốc..."), None
+    try:
+        video = VideoFileClip(video_path)
+        total_duration = video.duration
+    except Exception as e:
+        yield log(f"Lỗi đọc file Video: {e}"), None
+        return
+
+    clips = []
+    video_embeddings_matrix = None
+    processor = None
+    model = None
+    device = "cpu"
+
+    if HAS_AI:
+        yield log("Đang tải mô hình Qwen3-VL-Embedding-2B (có thể mất vài phút lần đầu)..."), None
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            yield log(f"Sử dụng thiết bị phần cứng: {device.upper()}"), None
+            
+            processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-Embedding-2B", trust_remote_code=True)
+            # Dùng float16 nếu có CUDA để tiết kiệm bộ nhớ và chạy nhanh hơn
+            torch_dtype = torch.float16 if device == "cuda" else torch.float32
+            model = AutoModel.from_pretrained("Qwen/Qwen3-VL-Embedding-2B", trust_remote_code=True, torch_dtype=torch_dtype)
+            model = model.to(device)
+            model.eval()
+            
+            yield log("Đã tải mô hình AI thành công. Bắt đầu phân tích video (Video Indexing)..."), None
+            
+            chunk_duration = 5.0  # Mỗi đoạn 5 giây
+            video_embeddings = []
+            chunk_times = []
+            
+            num_chunks = int(total_duration / chunk_duration)
+            if num_chunks == 0: 
+                num_chunks = 1
+            
+            for c_idx in progress.tqdm(range(num_chunks), desc="Đang phân tích các phân cảnh video"):
+                c_start = c_idx * chunk_duration
+                c_end = min(c_start + chunk_duration, total_duration)
+                chunk_times.append(c_start)
+                
+                mid_time = c_start + (c_end - c_start) / 2
+                frame = video.get_frame(mid_time)
+                
+                pil_img = Image.fromarray(frame)
+                
+                messages = [
+                    {"role": "user", "content": [
+                        {"type": "image", "image": pil_img}, 
+                        {"type": "text", "text": "Describe this image."}
+                    ]}
+                ]
+                
+                try:
+                    image_inputs, video_inputs = process_vision_info(messages)
+                    text_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                    inputs = processor(
+                        text=[text_prompt], 
+                        images=image_inputs, 
+                        videos=video_inputs, 
+                        padding=True, 
+                        return_tensors="pt"
+                    ).to(device)
+                    
+                    with torch.no_grad():
+                        outputs = model(**inputs)
+                        embed = outputs.last_hidden_state.mean(dim=1) if hasattr(outputs, 'last_hidden_state') else outputs.image_embeds
+                        embed = F.normalize(embed, p=2, dim=1)
+                        video_embeddings.append(embed)
+                except Exception as e:
+                    yield log(f"Cảnh báo: Lỗi embed video chunk {c_idx}: {e}"), None
+                    video_embeddings.append(torch.zeros((1, 768)).to(device))
+            
+            if len(video_embeddings) > 0:
+                video_embeddings_matrix = torch.cat(video_embeddings, dim=0)
+                yield log(f"Đã hoàn thành Indexing {len(video_embeddings)} chunks."), None
+            
+        except Exception as e:
+            yield log(f"Cảnh báo: Lỗi khởi tạo hoặc chạy mô hình AI: {e}. Sẽ chạy ở chế độ fallback không có AI."), None
+    else:
+        yield log("Cảnh báo: Thư viện AI (transformers/qwen_vl_utils) không khả dụng. Sẽ cắt theo timeline của phụ đề."), None
+
+    total_subs = len(subs)
+    fallback_to_timeline = (mode == "AI search + fallback to timeline")
+
+    for i, sub in enumerate(subs):
+        text = sub.text.replace('\n', ' ')
+        start_sec = sub.start.ordinal / 1000.0
+        end_sec = sub.end.ordinal / 1000.0
+        duration = end_sec - start_sec
+        
+        yield log(f"[{i+1}/{total_subs}] Đang tìm kiếm: '{text}' ({duration:.2f}s)"), None
+        
+        match_found = False
+        match_start = start_sec
+        
+        if video_embeddings_matrix is not None and processor is not None and model is not None:
+            try:
+                messages_text = [
+                    {"role": "user", "content": [{"type": "text", "text": text}]}
+                ]
+                text_prompt = processor.apply_chat_template(messages_text, tokenize=False, add_generation_prompt=True)
+                text_inputs = processor(text=[text_prompt], padding=True, return_tensors="pt").to(device)
+                
+                with torch.no_grad():
+                    outputs_text = model(**text_inputs)
+                    text_embed = outputs_text.last_hidden_state.mean(dim=1) if hasattr(outputs_text, 'last_hidden_state') else outputs_text.text_embeds
+                    text_embed = F.normalize(text_embed, p=2, dim=1)
+                
+                similarities = (video_embeddings_matrix @ text_embed.T).squeeze(1)
+                best_idx = torch.argmax(similarities).item()
+                best_score = similarities[best_idx].item()
+                
+                yield log(f"  -> Độ khớp cao nhất: {best_score:.3f} tại {chunk_times[best_idx]:.1f}s"), None
+                
+                if best_score > threshold:
+                    match_found = True
+                    match_start = chunk_times[best_idx]
+            except Exception as e:
+                yield log(f"  -> Lỗi so khớp AI: {e}"), None
+        
+        if match_found:
+            match_end = min(match_start + duration, total_duration)
+            if match_end > match_start:
+                clip = video.subclipped(match_start, match_end)
+                clips.append(clip)
+                yield log(f"  -> ĐÃ KHỚP: Cắt đoạn AI ({match_start:.2f}s - {match_end:.2f}s)"), None
+        else:
+            if fallback_to_timeline or video_embeddings_matrix is None:
+                end_cut = min(end_sec, total_duration)
+                if end_cut > start_sec:
+                    clip = video.subclipped(start_sec, end_cut)
+                    clips.append(clip)
+                    yield log(f"  -> KHÔNG KHỚP: Cắt theo timeline gốc ({start_sec:.2f}s - {end_cut:.2f}s)"), None
+            else:
+                yield log("  -> KHÔNG KHỚP: Bỏ qua phân cảnh này"), None
+
+    if clips:
+        yield log("Đang tiến hành ghép các đoạn video..."), None
+        try:
+            final_video = concatenate_videoclips(clips)
+            
+            # Tạo đường dẫn lưu tạm file đầu ra
+            temp_output = os.path.join(tempfile.gettempdir(), "sentrysearch_output.mp4")
+            yield log(f"Đang xuất file video ra {temp_output}..."), None
+            
+            final_video.write_videofile(
+                temp_output, 
+                codec="libx264", 
+                audio_codec="aac", 
+                logger=None
+            )
+            
+            video.close()
+            yield log("Hoàn thành xử lý video thành công!"), temp_output
+        except Exception as e:
+            yield log(f"Lỗi xuất video: {e}"), None
+            if video:
+                video.close()
+    else:
+        yield log("Lỗi: Không có phân cảnh video nào được cắt ghép."), None
+        if video:
+            video.close()
+
+# Custom CSS for modern premium glassmorphism aesthetic
+custom_css = """
+body {
+    background-color: #0b0f19;
+    color: #f3f4f6;
+    font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.gradio-container {
+    max-width: 1000px !important;
+    background: radial-gradient(circle at top right, rgba(29, 78, 216, 0.15), transparent), 
+                radial-gradient(circle at bottom left, rgba(139, 92, 246, 0.1), transparent);
+}
+.main-title {
+    text-align: center;
+    background: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-size: 2.8rem;
+    font-weight: 800;
+    margin-bottom: 0.5rem;
+}
+.subtitle {
+    text-align: center;
+    color: #9ca3af;
+    font-size: 1.1rem;
+    margin-bottom: 2rem;
+}
+.glass-panel {
+    background: rgba(17, 24, 39, 0.7);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+.btn-primary {
+    background: linear-gradient(135deg, #4f46e5, #7c3aed) !important;
+    color: white !important;
+    border: none !important;
+    font-weight: 600 !important;
+    transition: all 0.3s ease !important;
+}
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 20px rgba(124, 58, 237, 0.4) !important;
+}
+"""
+
+with gr.Blocks(css=custom_css, theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="violet")) as demo:
+    gr.HTML("<h1 class='main-title'>SentrySearch WebUI</h1>")
+    gr.HTML("<p class='subtitle'>Đối chiếu và ghép nối Video & SRT bằng Trí tuệ Nhân tạo Qwen3-VL</p>")
+    
+    with gr.Row():
+        with gr.Column(scale=1):
+            with gr.Group(elem_classes="glass-panel"):
+                gr.Markdown("### 1. Đầu vào & Cấu hình")
+                video_input = gr.Video(label="Chọn file Video gốc", sources=["upload"])
+                srt_input = gr.File(label="Chọn file phụ đề SRT", file_types=[".srt"])
+                
+                mode_input = gr.Radio(
+                    choices=["AI search + fallback to timeline", "AI search only"],
+                    value="AI search + fallback to timeline",
+                    label="Chế độ xử lý"
+                )
+                
+                threshold_input = gr.Slider(
+                    minimum=0.0,
+                    maximum=1.0,
+                    value=0.15,
+                    step=0.01,
+                    label="Ngưỡng tin cậy (Confidence Threshold)"
+                )
+                
+                submit_btn = gr.Button("Bắt Đầu Xử Lý", variant="primary", elem_classes="btn-primary")
+                
+        with gr.Column(scale=1):
+            with gr.Group(elem_classes="glass-panel"):
+                gr.Markdown("### 2. Kết quả & Nhật ký hoạt động")
+                video_output = gr.Video(label="Video kết quả đã ghép nối")
+                log_output = gr.Code(label="Nhật ký hoạt động (Logs)", language="python", lines=15)
+
+    submit_btn.click(
+        fn=process_video_srt,
+        inputs=[video_input, srt_input, mode_input, threshold_input],
+        outputs=[log_output, video_output]
+    )
+
+if __name__ == "__main__":
+    # share=True giúp tạo public link khi chạy trên Colab
+    demo.queue().launch(share=True, server_name="0.0.0.0", server_port=7860)
