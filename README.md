@@ -4,6 +4,8 @@ An AI-powered video and subtitle matching application. It matches subtitle segme
 
 Ứng dụng đối chiếu và cắt ghép video theo phụ đề tự động bằng Trí tuệ Nhân tạo. Chương trình sử dụng mô hình nhúng ngôn ngữ - hình ảnh cục bộ để tìm kiếm phân cảnh phù hợp nhất với nội dung phụ đề SRT và tự động cắt ghép thành video hoàn chỉnh.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ltteamvn/Sentry-Search/blob/master/SentrySearch_Colab.ipynb)
+
 **Languages:** [English](#english) · [Tiếng Việt](#tiếng-việt)
 
 ---

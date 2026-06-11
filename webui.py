@@ -17,7 +17,7 @@ try:
 except ImportError:
     HAS_AI = False
 
-def process_video_srt(video_file, srt_file, mode, threshold, progress=gr.Progress()):
+def process_video_srt(video_file, srt_file, mode, threshold, model_name, progress=gr.Progress()):
     if video_file is None or srt_file is None:
         yield "Lỗi: Vui lòng cung cấp cả file Video và file phụ đề SRT.", None
         return
@@ -54,15 +54,15 @@ def process_video_srt(video_file, srt_file, mode, threshold, progress=gr.Progres
     device = "cpu"
 
     if HAS_AI:
-        yield log("Đang tải mô hình Qwen3-VL-Embedding-2B (có thể mất vài phút lần đầu)..."), None
+        yield log(f"Đang tải mô hình {model_name} (có thể mất vài phút lần đầu)..."), None
         try:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             yield log(f"Sử dụng thiết bị phần cứng: {device.upper()}"), None
             
-            processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-Embedding-2B", trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
             # Dùng float16 nếu có CUDA để tiết kiệm bộ nhớ và chạy nhanh hơn
             torch_dtype = torch.float16 if device == "cuda" else torch.float32
-            model = AutoModel.from_pretrained("Qwen/Qwen3-VL-Embedding-2B", trust_remote_code=True, torch_dtype=torch_dtype)
+            model = AutoModel.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch_dtype)
             model = model.to(device)
             model.eval()
             
@@ -113,7 +113,9 @@ def process_video_srt(video_file, srt_file, mode, threshold, progress=gr.Progres
                         video_embeddings.append(embed)
                 except Exception as e:
                     yield log(f"Cảnh báo: Lỗi embed video chunk {c_idx}: {e}"), None
-                    video_embeddings.append(torch.zeros((1, 768)).to(device))
+                    # Xác định số chiều vector dựa trên mô hình
+                    embed_dim = 2048 if "8b" in model_name.lower() else 768
+                    video_embeddings.append(torch.zeros((1, embed_dim)).to(device))
             
             if len(video_embeddings) > 0:
                 video_embeddings_matrix = torch.cat(video_embeddings, dim=0)
@@ -262,9 +264,15 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft(primary_hue="indigo", second
     with gr.Row():
         with gr.Column(scale=1):
             with gr.Group(elem_classes="glass-panel"):
-                gr.Markdown("### 1. Đầu vào & Cấu hình")
+                gr.Markdown("### 1. Giao diện & Cấu hình")
                 video_input = gr.Video(label="Chọn file Video gốc", sources=["upload"])
                 srt_input = gr.File(label="Chọn file phụ đề SRT", file_types=[".srt"])
+                
+                model_input = gr.Dropdown(
+                    choices=["Qwen/Qwen3-VL-Embedding-2B", "Qwen/Qwen3-VL-Embedding-8B"],
+                    value="Qwen/Qwen3-VL-Embedding-2B",
+                    label="Mô hình AI sử dụng (AI Model)"
+                )
                 
                 mode_input = gr.Radio(
                     choices=["AI search + fallback to timeline", "AI search only"],
@@ -290,10 +298,9 @@ with gr.Blocks(css=custom_css, theme=gr.themes.Soft(primary_hue="indigo", second
 
     submit_btn.click(
         fn=process_video_srt,
-        inputs=[video_input, srt_input, mode_input, threshold_input],
+        inputs=[video_input, srt_input, mode_input, threshold_input, model_input],
         outputs=[log_output, video_output]
     )
 
 if __name__ == "__main__":
-    # share=True giúp tạo public link khi chạy trên Colab
     demo.queue().launch(share=True, server_name="0.0.0.0", server_port=7860)
