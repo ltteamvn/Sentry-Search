@@ -39,7 +39,7 @@ git clone https://github.com/ltteamvn/Sentry-Search.git
 cd Sentry-Search
 
 # Install dependencies
-uv pip install -e .[local] PySide6 PySide6-Fluent-Widgets pysrt moviepy gradio
+uv pip install -r requirements.txt
 ```
 
 #### **3. Run Desktop GUI**
@@ -89,7 +89,7 @@ git clone https://github.com/ltteamvn/Sentry-Search.git
 cd Sentry-Search
 
 # Cài đặt toàn bộ môi trường và các gói thư viện
-uv pip install -e .[local] PySide6 PySide6-Fluent-Widgets pysrt moviepy gradio
+uv pip install -r requirements.txt
 ```
 
 #### **3. Chạy giao diện Desktop GUI**
