@@ -85,6 +85,8 @@ def process_video_srt(video_file, srt_file, mode, threshold, progress=gr.Progres
                 frame = video.get_frame(mid_time)
                 
                 pil_img = Image.fromarray(frame)
+                # Giới hạn kích thước ảnh tối đa là 480px để tránh lỗi tràn bộ nhớ VRAM (CUDA OOM) trên card 4GB
+                pil_img.thumbnail((480, 480), Image.Resampling.LANCZOS)
                 
                 messages = [
                     {"role": "user", "content": [

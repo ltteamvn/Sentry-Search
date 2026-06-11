@@ -84,6 +84,8 @@ class VideoProcessorThread(QThread):
                         # Tuỳ model Qwen3-VL-Embedding yêu cầu, ta giả định truyền ảnh PIL hoặc numpy
                         from PIL import Image
                         pil_img = Image.fromarray(frame)
+                        # Giới hạn kích thước ảnh tối đa là 480px để tránh lỗi tràn bộ nhớ VRAM (CUDA OOM) trên card 4GB
+                        pil_img.thumbnail((480, 480), Image.Resampling.LANCZOS)
                         
                         # Tạo input message cho frame video
                         messages = [
