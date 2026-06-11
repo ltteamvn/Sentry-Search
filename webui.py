@@ -121,6 +121,36 @@ def process_video_srt_core(video_path, srt_path, mode, threshold, model_name, pr
             if len(video_embeddings) > 0:
                 video_embeddings_matrix = torch.cat(video_embeddings, dim=0)
                 yield log(f"Đã hoàn thành Indexing {len(video_embeddings)} chunks."), None
+
+            # Nhúng phụ đề hàng loạt để tăng tốc
+            text_embeddings_matrix = None
+            if video_embeddings_matrix is not None:
+                try:
+                    yield log("Đang nhúng toàn bộ phụ đề bằng AI (Batching)..."), None
+                    all_texts = [sub.text.replace('\n', ' ') for sub in subs]
+                    text_embeddings = []
+                    batch_size = 64
+                    
+                    for b_idx in range(0, len(all_texts), batch_size):
+                        batch_texts = all_texts[b_idx:b_idx+batch_size]
+                        text_prompts = []
+                        for t in batch_texts:
+                            messages_text = [{"role": "user", "content": [{"type": "text", "text": t}]}]
+                            prompt = processor.apply_chat_template(messages_text, tokenize=False, add_generation_prompt=True)
+                            text_prompts.append(prompt)
+                        
+                        text_inputs = processor(text=text_prompts, padding=True, return_tensors="pt").to(device)
+                        with torch.no_grad():
+                            outputs_text = model(**text_inputs)
+                            batch_embeds = outputs_text.last_hidden_state.mean(dim=1) if hasattr(outputs_text, 'last_hidden_state') else outputs_text.text_embeds
+                            batch_embeds = F.normalize(batch_embeds, p=2, dim=1)
+                            text_embeddings.append(batch_embeds)
+                    
+                    if len(text_embeddings) > 0:
+                        text_embeddings_matrix = torch.cat(text_embeddings, dim=0)
+                        yield log(f"Đã nhúng xong {len(all_texts)} câu phụ đề."), None
+                except Exception as e:
+                    yield log(f"Cảnh báo: Lỗi khi nhúng phụ đề hàng loạt: {e}. Sẽ chạy ở chế độ nhúng từng câu."), None
             
         except Exception as e:
             yield log(f"Cảnh báo: Lỗi khởi tạo hoặc chạy mô hình AI: {e}. Sẽ chạy ở chế độ fallback không có AI."), None
@@ -143,16 +173,20 @@ def process_video_srt_core(video_path, srt_path, mode, threshold, model_name, pr
         
         if video_embeddings_matrix is not None and processor is not None and model is not None:
             try:
-                messages_text = [
-                    {"role": "user", "content": [{"type": "text", "text": text}]}
-                ]
-                text_prompt = processor.apply_chat_template(messages_text, tokenize=False, add_generation_prompt=True)
-                text_inputs = processor(text=[text_prompt], padding=True, return_tensors="pt").to(device)
-                
-                with torch.no_grad():
-                    outputs_text = model(**text_inputs)
-                    text_embed = outputs_text.last_hidden_state.mean(dim=1) if hasattr(outputs_text, 'last_hidden_state') else outputs_text.text_embeds
-                    text_embed = F.normalize(text_embed, p=2, dim=1)
+                # Sử dụng ma trận nhúng sẵn nếu có
+                if text_embeddings_matrix is not None:
+                    text_embed = text_embeddings_matrix[i:i+1]
+                else:
+                    messages_text = [
+                        {"role": "user", "content": [{"type": "text", "text": text}]}
+                    ]
+                    text_prompt = processor.apply_chat_template(messages_text, tokenize=False, add_generation_prompt=True)
+                    text_inputs = processor(text=[text_prompt], padding=True, return_tensors="pt").to(device)
+                    
+                    with torch.no_grad():
+                        outputs_text = model(**text_inputs)
+                        text_embed = outputs_text.last_hidden_state.mean(dim=1) if hasattr(outputs_text, 'last_hidden_state') else outputs_text.text_embeds
+                        text_embed = F.normalize(text_embed, p=2, dim=1)
                 
                 similarities = (video_embeddings_matrix @ text_embed.T).squeeze(1)
                 best_idx = torch.argmax(similarities).item()

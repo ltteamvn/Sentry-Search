@@ -19,3 +19,7 @@ CLAUDE.md
 # Logs and local env
 error.log
 .venv/
+
+# MoviePy and output temp files
+output*.mp4
+*TEMP_MPY*
